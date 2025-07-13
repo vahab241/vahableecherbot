@@ -11,42 +11,53 @@ from telegram.ext import Application, ApplicationBuilder, CommandHandler, Messag
 from concurrent.futures import ThreadPoolExecutor
 from pydrive2.auth import GoogleAuth
 from pydrive2.drive import GoogleDrive
+import fcntl  # برای قفل فایل
 
 # --- تنظیمات ---
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
+if not TELEGRAM_TOKEN:
+    raise ValueError("TELEGRAM_TOKEN is not set in environment variables.")
 OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
 DOWNLOAD_DIR = "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 active_downloads = {}  # دیکشنری برای ذخیره دانلودهای فعال: {شناسه: (handle, thread)}
 errors = []  # لیست برای ذخیره خطاها
+LOCK_FILE = "/tmp/vahab_bot.lock"  # فایل قفل برای جلوگیری از اجرای چندگانه
 
 # --- پیکربندی Google Drive ---
-temp_dir = "/tmp/vahab_auth"
-os.makedirs(temp_dir, exist_ok=True)
-token_path = os.path.join(temp_dir, "token.json")
-creds_path = os.path.join(temp_dir, "credentials.json")
-try:
-    shutil.copyfile("/etc/secrets/token.json", token_path)
-    shutil.copyfile("/etc/secrets/credentials.json", creds_path)
-except FileNotFoundError as e:
-    logging.error(f"فایل احراز هویت پیدا نشد: {e}")
-    raise
+def setup_drive_auth():
+    temp_dir = "/tmp/vahab_auth"
+    os.makedirs(temp_dir, exist_ok=True)
+    token_path = os.path.join(temp_dir, "token.json")
+    creds_path = os.path.join(temp_dir, "credentials.json")
+    try:
+        if not os.path.exists(token_path) or not os.path.exists(creds_path):
+            logging.warning("فایل‌های احراز هویت Google Drive پیدا نشد. از مسیر پیش‌فرض استفاده می‌شود.")
+            return None
+        shutil.copyfile("/etc/secrets/token.json", token_path)
+        shutil.copyfile("/etc/secrets/credentials.json", creds_path)
+    except FileNotFoundError as e:
+        logging.error(f"فایل احراز هویت پیدا نشد: {e}")
+        return None
 
-gauth = GoogleAuth()
-try:
-    gauth.LoadCredentialsFile(token_path)
-    if gauth.credentials is None:
-        gauth.LoadClientConfigFile(creds_path)
-    elif gauth.access_token_expired:
-        gauth.Refresh()
-    else:
-        gauth.Authorize()
-    drive = GoogleDrive(gauth)
-except Exception as e:
-    logging.error(f"خطا در احراز هویت Google Drive: {e}")
-    raise
+    gauth = GoogleAuth()
+    try:
+        gauth.LoadCredentialsFile(token_path)
+        if gauth.credentials is None:
+            gauth.LoadClientConfigFile(creds_path)
+        elif gauth.access_token_expired:
+            gauth.Refresh()
+        else:
+            gauth.Authorize()
+        drive = GoogleDrive(gauth)
+        return drive
+    except Exception as e:
+        logging.error(f"خطا در احراز هویت Google Drive: {e}")
+        return None
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
-shutil.rmtree(temp_dir, ignore_errors=True)
+drive = setup_drive_auth()
 
 # --- پیکربندی libtorrent ---
 ses = lt.session({'listen_interfaces': '0.0.0.0:6881'})
@@ -67,6 +78,9 @@ class TorrentDownloader(threading.Thread):
 
     def run(self):
         global active_downloads, errors
+        if not drive and self.destination == "google_drive":
+            errors.append(f"خطا: احراز هویت Google Drive برای دانلود (ID: {self.download_id}) انجام نشده.")
+            return
         params = {"save_path": DOWNLOAD_DIR, "storage_mode": lt.storage_mode_t(2)}
         try:
             self.handle = lt.add_magnet_uri(ses, self.magnet_link, params)
@@ -318,23 +332,45 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             os.remove(file_path)
 
 # --- اجرای ربات ---
-executor = ThreadPoolExecutor(max_workers=5)
+def acquire_lock():
+    lock_file = open(LOCK_FILE, 'w')
+    try:
+        fcntl.lockf(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return lock_file
+    except IOError:
+        return None
+
+def release_lock(lock_file):
+    if lock_file:
+        lock_file.close()
 
 def main():
     logging.basicConfig(level=logging.INFO)
-    application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    lock_file = acquire_lock()
+    if not lock_file:
+        logging.error("ربات در حال اجرا است. فقط یک نمونه مجاز است.")
+        return
 
-    # اضافه کردن تسک اعلان خطاها
-    application.job_queue.run_repeating(check_errors, interval=300, first=0)
+    executor = ThreadPoolExecutor(max_workers=5)
+    try:
+        application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("list", list_downloads))
-    application.add_handler(CommandHandler("stop", stop_download))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    application.add_handler(MessageHandler(filters.Document.ALL, handle_file))
-    application.add_handler(CallbackQueryHandler(handle_callback))
+        # اضافه کردن تسک اعلان خطاها
+        application.job_queue.run_repeating(check_errors, interval=300, first=0)
 
-    application.run_polling()
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CommandHandler("list", list_downloads))
+        application.add_handler(CommandHandler("stop", stop_download))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+        application.add_handler(MessageHandler(filters.Document.ALL, handle_file))
+        application.add_handler(CallbackQueryHandler(handle_callback))
+
+        application.run_polling()
+    except Exception as e:
+        logging.error(f"خطا در اجرای ربات: {e}")
+    finally:
+        release_lock(lock_file)
+        executor.shutdown(wait=False)
 
 if __name__ == "__main__":
     main()
