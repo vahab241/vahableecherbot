@@ -1,6 +1,5 @@
 import libtorrent as lt
 import asyncio
-import threading
 import os
 import shutil
 import logging
@@ -18,8 +17,8 @@ from telegram.ext import (
 )
 from pydrive2.auth import GoogleAuth
 from pydrive2.drive import GoogleDrive
-import fcntl
 import socket
+from filelock import FileLock  # اضافه کردن پکیج filelock
 
 # --- تنظیمات ---
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
@@ -242,7 +241,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         await query.edit_message_text(f"<b>📥 دانلود شروع شد</b> (ID: {download_id}) و فایل در *{action}* ذخیره می‌شه.", parse_mode="HTML")
         task = asyncio.create_task(download_torrent(download_id, magnet_link, context, query.message.chat_id, action))
-        active_downloads[download_id] = (None, task)  # به‌روزرسانی با تسک
+        active_downloads[download_id] = (None, task)
 
 # --- پیام متنی ---
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -302,18 +301,6 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             os.remove(file_path)
 
 # --- اجرای ربات ---
-def acquire_lock():
-    try:
-        lock_file = open(LOCK_FILE, "w")
-        fcntl.lockf(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return lock_file
-    except IOError:
-        return None
-
-def release_lock(lock_file):
-    if lock_file:
-        lock_file.close()
-
 def run_dummy_server():
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -325,36 +312,33 @@ def run_dummy_server():
         conn.close()
 
 def main():
-    lock_file = acquire_lock()
-    if not lock_file:
-        logger.error("ربات در حال اجرا است. فقط یک نمونه مجاز است.")
-        return
-
+    lock = FileLock(LOCK_FILE, timeout=1)  # قفل با زمان‌بندی
     try:
-        # اجرای سرور صوری توی ترد جدا
-        dummy_thread = threading.Thread(target=run_dummy_server, daemon=True)
-        dummy_thread.start()
+        with lock:
+            logger.info("قفل با موفقیت گرفته شد. اجرای ربات شروع شد.")
+            # اجرای سرور صوری توی ترد جدا
+            dummy_thread = threading.Thread(target=run_dummy_server, daemon=True)
+            dummy_thread.start()
 
-        # ساخت اپلیکیشن
-        application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+            # ساخت اپلیکیشن
+            application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
-        # تنظیم تسک دوره‌ای
-        application.job_queue.run_repeating(check_errors, interval=300)
+            # تنظیم تسک دوره‌ای
+            application.job_queue.run_repeating(check_errors, interval=300)
 
-        # اضافه کردن هندلرها
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(CommandHandler("list", list_downloads))
-        application.add_handler(CommandHandler("stop", stop_download))
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-        application.add_handler(MessageHandler(filters.Document.ALL, handle_file))
-        application.add_handler(CallbackQueryHandler(handle_callback))
+            # اضافه کردن هندلرها
+            application.add_handler(CommandHandler("start", start))
+            application.add_handler(CommandHandler("list", list_downloads))
+            application.add_handler(CommandHandler("stop", stop_download))
+            application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+            application.add_handler(MessageHandler(filters.Document.ALL, handle_file))
+            application.add_handler(CallbackQueryHandler(handle_callback))
 
-        # اجرای ربات
-        application.run_polling(allowed_updates=Update.ALL_TYPES)
+            # اجرای ربات
+            application.run_polling(allowed_updates=Update.ALL_TYPES)
     except Exception as e:
         logger.error(f"خطا در اجرای ربات: {e}", exc_info=True)
     finally:
-        release_lock(lock_file)
         if "dummy_thread" in locals():
             dummy_thread.join(timeout=5)
 
