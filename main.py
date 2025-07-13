@@ -61,6 +61,7 @@ class TorrentDownloader(threading.Thread):
         self.destination = destination  # 'telegram' یا 'google_drive'
         self.handle = None
         self.running = True
+        self.completed = False
 
     def run(self):
         global active_downloads
@@ -68,34 +69,35 @@ class TorrentDownloader(threading.Thread):
         try:
             self.handle = lt.add_magnet_uri(ses, self.magnet_link, params)
             active_downloads[self.download_id] = (self.handle, self)
-            self.send_message(f"🔍 در حال دریافت اطلاعات تورنت (ID: {self.download_id})...")
+            self.send_message(f"<b>🔍 در حال دریافت اطلاعات تورنت</b> (ID: {self.download_id})...")
             while not self.handle.has_metadata() and self.running:
                 time.sleep(1)
 
             name = self.handle.name()
-            self.send_message(f"⬇️ دانلود {name} (ID: {self.download_id}) آغاز شد")
+            self.send_message(f"<b>⬇️ دانلود آغاز شد</b>: *{name}* (ID: {self.download_id})")
             while not self.handle.is_seed() and self.running:
                 s = self.handle.status()
                 percent = int(s.progress * 100)
                 speed = int(s.download_rate / 1000)
                 progress_bar = "█" * (percent // 10) + "-" * (10 - percent // 10)
-                self.send_message(f"📥 {name} (ID: {self.download_id}) - [{progress_bar}] {percent}% ({speed} KB/s)")
+                self.send_message(f"<b>📥 در حال دانلود</b> *{name}* (ID: {self.download_id})\n[{progress_bar}] <i>{percent}% ({speed} KB/s)</i>")
                 time.sleep(30)
 
             if self.running and self.download_id in active_downloads:
-                self.send_message(f"✅ دانلود کامل شد: {name} (ID: {self.download_id})")
+                self.completed = True
+                self.send_message(f"<b>✅ دانلود کامل شد</b>: *{name}* (ID: {self.download_id})")
                 file_path = os.path.join(DOWNLOAD_DIR, name)
                 if self.destination == "telegram":
                     if os.path.exists(file_path):
                         try:
                             with open(file_path, 'rb') as f:
-                                asyncio.run_coroutine_threadsafe(
+                                msg = asyncio.run_coroutine_threadsafe(
                                     self.context.bot.send_document(chat_id=self.chat_id, document=f),
                                     self.loop
-                                )
-                            self.send_message(f"📤 فایل {name} (ID: {self.download_id}) به تلگرام ارسال شد.")
+                                ).result()
+                            self.send_completion_message(name, msg.message_id)
                         except Exception as e:
-                            self.send_message(f"❌ خطا در ارسال فایل (ID: {self.download_id}): {e}")
+                            self.send_message(f"<b>❌ خطا در ارسال فایل</b> (ID: {self.download_id}): {e}")
                         finally:
                             os.remove(file_path)
                 elif self.destination == "google_drive":
@@ -104,26 +106,45 @@ class TorrentDownloader(threading.Thread):
                         file.SetContentFile(file_path)
                         file.Upload()
                         file_url = file['webContentLink']
-                        self.send_message(f"📤 فایل {name} (ID: {self.download_id}) به گوگل درایو آپلود شد: {file_url}")
+                        self.send_completion_message(name, file_url)
                         os.remove(file_path)
                     except Exception as e:
-                        self.send_message(f"❌ خطا در آپلود به گوگل درایو (ID: {self.download_id}): {e}")
+                        self.send_message(f"<b>❌ خطا در آپلود به گوگل درایو</b> (ID: {self.download_id}): {e}")
                 del active_downloads[self.download_id]
         except Exception as e:
-            self.send_message(f"❌ خطا در دانلود (ID: {self.download_id}): {e}")
+            self.send_message(f"<b>❌ خطا در دانلود</b> (ID: {self.download_id}): {e}")
 
     def send_message(self, text):
-        asyncio.run_coroutine_threadsafe(self.context.bot.send_message(chat_id=self.chat_id, text=text), self.loop)
+        asyncio.run_coroutine_threadsafe(
+            self.context.bot.send_message(chat_id=self.chat_id, text=text, parse_mode='HTML'),
+            self.loop
+        )
+
+    def send_completion_message(self, name, link_or_message_id):
+        keyboard = [[InlineKeyboardButton("مشاهده", callback_data=f"view_{self.download_id}")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        if isinstance(link_or_message_id, str):  # گوگل درایو
+            asyncio.run_coroutine_threadsafe(
+                self.context.bot.send_message(chat_id=self.chat_id, text=f"<b>📤 فایل آماده است</b>: *{name}*\nلینک: {link_or_message_id}",
+                                             parse_mode='HTML', reply_markup=reply_markup),
+                self.loop
+            )
+        else:  # تلگرام
+            asyncio.run_coroutine_threadsafe(
+                self.context.bot.send_message(chat_id=self.chat_id, text=f"<b>📤 فایل آماده است</b>: *{name}*",
+                                             parse_mode='HTML', reply_markup=reply_markup),
+                self.loop
+            )
 
     def stop(self):
         self.running = False
         if self.handle:
             ses.remove_torrent(self.handle)
-            self.send_message(f"⏹ دانلود (ID: {self.download_id}) متوقف شد.")
+            self.send_message(f"<b>⏹ دانلود متوقف شد</b> (ID: {self.download_id})")
 
 # --- فرمان /start ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("سلام! لینک مگنت، فایل تورنت یا متنی بفرست. برای لیست دانلودها /list بفرست.")
+    await update.message.reply_text("<b>سلام!</b> لینک مگنت، فایل تورنت یا متنی بفرست. برای لیست دانلودها /list بفرست.", parse_mode='HTML')
 
 # --- فرمان /list ---
 async def list_downloads(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -131,7 +152,7 @@ async def list_downloads(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=update.effective_user.id, text="❗ فقط مالک ربات می‌تونه ازش استفاده کنه.")
         return
     if not active_downloads:
-        await context.bot.send_message(chat_id=OWNER_ID, text="📋 هیچ دانلود فعالی وجود نداره.")
+        await context.bot.send_message(chat_id=OWNER_ID, text="<b>📋 هیچ دانلود فعالی وجود نداره.</b>", parse_mode='HTML')
         return
     keyboard = []
     for download_id, (handle, _) in active_downloads.items():
@@ -146,7 +167,7 @@ async def list_downloads(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         keyboard.append(row)
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await context.bot.send_message(chat_id=OWNER_ID, text="📋 لیست دانلودهای فعال:", reply_markup=reply_markup)
+    await context.bot.send_message(chat_id=OWNER_ID, text="<b>📋 لیست دانلودهای فعال:</b>", parse_mode='HTML', reply_markup=reply_markup)
 
 # --- فرمان /stop ---
 async def stop_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -154,16 +175,16 @@ async def stop_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=update.effective_user.id, text="❗ فقط مالک ربات می‌تونه ازش استفاده کنه.")
         return
     if not context.args:
-        await context.bot.send_message(chat_id=OWNER_ID, text="❗ لطفاً شناسه دانلود رو وارد کن (مثال: /stop 1).")
+        await context.bot.send_message(chat_id=OWNER_ID, text="<b>❗ لطفاً شناسه دانلود رو وارد کن</b> (مثال: /stop 1).", parse_mode='HTML')
         return
     download_id = context.args[0]
     if download_id in active_downloads:
         _, thread = active_downloads[download_id]
         thread.stop()
         del active_downloads[download_id]
-        await context.bot.send_message(chat_id=OWNER_ID, text=f"⏹ دانلود (ID: {download_id}) متوقف شد.")
+        await context.bot.send_message(chat_id=OWNER_ID, text=f"<b>⏹ دانلود متوقف شد</b> (ID: {download_id}).", parse_mode='HTML')
     else:
-        await context.bot.send_message(chat_id=OWNER_ID, text=f"❌ دانلود با ID {download_id} پیدا نشد.")
+        await context.bot.send_message(chat_id=OWNER_ID, text=f"<b>❌ دانلود با ID {download_id} پیدا نشد</b>.", parse_mode='HTML')
 
 # --- مدیریت کلیک دکمه‌ها ---
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -180,18 +201,28 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             percent = int(s.progress * 100)
             speed = int(s.download_rate / 1000)
             progress_bar = "█" * (percent // 10) + "-" * (10 - percent // 10)
-            await query.edit_message_text(f"📊 وضعیت (ID: {download_id}) - [{progress_bar}] {percent}% ({speed} KB/s)")
+            await query.edit_message_text(f"<b>📊 وضعیت</b> (ID: {download_id})\n[{progress_bar}] <i>{percent}% ({speed} KB/s)</i>", parse_mode='HTML')
     elif action == "stop":
         if download_id in active_downloads:
             _, thread = active_downloads[download_id]
             thread.stop()
             del active_downloads[download_id]
-            await query.edit_message_text(f"⏹ دانلود (ID: {download_id}) متوقف شد.")
+            await query.edit_message_text(f"<b>⏹ دانلود متوقف شد</b> (ID: {download_id}).", parse_mode='HTML')
     elif action == "delete":
         if download_id in active_downloads:
             ses.remove_torrent(active_downloads[download_id][0])
             del active_downloads[download_id]
-            await query.edit_message_text(f"🗑 دانلود (ID: {download_id}) حذف شد.")
+            await query.edit_message_text(f"<b>🗑 دانلود حذف شد</b> (ID: {download_id}).", parse_mode='HTML')
+    elif action == "view":
+        if download_id in active_downloads and active_downloads[download_id][1].completed:
+            handle, _ = active_downloads[download_id]
+            name = handle.name()
+            file_path = os.path.join(DOWNLOAD_DIR, name)
+            if os.path.exists(file_path):
+                with open(file_path, 'rb') as f:
+                    await query.message.reply_document(document=f)
+            else:
+                await query.edit_message_text(f"<b>❌ فایل {name} (ID: {download_id}) پیدا نشد</b>.", parse_mode='HTML')
 
 # --- پیام متنی ---
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -209,9 +240,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(f"فایل کجا ذخیره بشه؟ (ID: {download_id})", reply_markup=reply_markup)
+        await update.message.reply_text(f"<b>فایل کجا ذخیره بشه؟</b> (ID: {download_id})", parse_mode='HTML', reply_markup=reply_markup)
     else:
-        await context.bot.send_message(chat_id=OWNER_ID, text="❗ لطفاً فقط لینک مگنت معتبر ارسال کنید.")
+        await context.bot.send_message(chat_id=OWNER_ID, text="<b>❗ لطفاً فقط لینک مگنت معتبر ارسال کنید</b>.", parse_mode='HTML')
 
 # --- مدیریت انتخاب مقصد ---
 async def handle_destination(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -222,12 +253,12 @@ async def handle_destination(update: Update, context: ContextTypes.DEFAULT_TYPE)
     download_id = data[1]
     magnet_link = context.user_data.get('magnet_link')
     if not magnet_link:
-        await query.message.reply_text("❌ خطا: لینک مگنت پیدا نشد.")
+        await query.message.reply_text("<b>❌ خطا: لینک مگنت پیدا نشد</b>.", parse_mode='HTML')
         return
     loop = asyncio.get_running_loop()
     t = TorrentDownloader(download_id, magnet_link, context, loop, query.message.chat_id, destination)
     executor.submit(t.run)
-    await query.message.reply_text(f"📥 دانلود شروع شد (ID: {download_id}) و فایل در {destination} ذخیره می‌شه.")
+    await query.message.reply_text(f"<b>📥 دانلود شروع شد</b> (ID: {download_id}) و فایل در *{destination}* ذخیره می‌شه.", parse_mode='HTML')
 
 # --- دریافت فایل تورنت یا متنی ---
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -253,7 +284,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 ]
                             ]
                             reply_markup = InlineKeyboardMarkup(keyboard)
-                            await update.message.reply_text(f"فایل {line} کجا ذخیره بشه? (ID: {download_id})", reply_markup=reply_markup)
+                            await update.message.reply_text(f"<b>فایل {line} کجا ذخیره بشه?</b> (ID: {download_id})", parse_mode='HTML', reply_markup=reply_markup)
                 else:
                     download_id = str(len(active_downloads) + 1)
                     context.user_data['magnet_link'] = file_path
@@ -264,11 +295,11 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         ]
                     ]
                     reply_markup = InlineKeyboardMarkup(keyboard)
-                    await update.message.reply_text(f"فایل تورنت کجا ذخیره بشه? (ID: {download_id})", reply_markup=reply_markup)
+                    await update.message.reply_text(f"<b>فایل تورنت کجا ذخیره بشه?</b> (ID: {download_id})", parse_mode='HTML', reply_markup=reply_markup)
         else:
-            await context.bot.send_message(chat_id=OWNER_ID, text="❗ فقط فایل‌های تورنت (.torrent) یا متنی (.txt) پشتیبانی می‌شوند.")
+            await context.bot.send_message(chat_id=OWNER_ID, text="<b>❗ فقط فایل‌های تورنت (.torrent) یا متنی (.txt) پشتیبانی می‌شوند</b>.", parse_mode='HTML')
     except Exception as e:
-        await context.bot.send_message(chat_id=OWNER_ID, text=f"❌ خطا در پردازش فایل: {e}")
+        await context.bot.send_message(chat_id=OWNER_ID, text=f"<b>❌ خطا در پردازش فایل</b>: {e}", parse_mode='HTML')
     finally:
         if os.path.exists(file_path):
             os.remove(file_path)
