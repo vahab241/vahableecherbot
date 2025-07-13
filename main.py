@@ -18,15 +18,13 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 # --- پیکربندی Google Drive ---
 gauth = GoogleAuth()
-gauth.LoadCredentialsFile("token.json")
+gauth.LoadCredentialsFile("/etc/secrets/token.json")
 if gauth.credentials is None:
-    gauth.LoadClientConfigFile("credentials.json")
-    gauth.LocalWebserverAuth()  # برای احراز هویت اولیه (فقط توی Codespace)
+    gauth.LoadClientConfigFile("/etc/secrets/credentials.json")
 elif gauth.access_token_expired:
     gauth.Refresh()
 else:
     gauth.Authorize()
-gauth.SaveCredentialsFile("token.json")
 drive = GoogleDrive(gauth)
 
 # --- پیکربندی libtorrent ---
