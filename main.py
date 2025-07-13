@@ -5,6 +5,7 @@ import os
 import shutil
 import logging
 import time
+import gc
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 from concurrent.futures import ThreadPoolExecutor
@@ -17,6 +18,7 @@ OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
 DOWNLOAD_DIR = "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 active_downloads = {}  # دیکشنری برای ذخیره دانلودهای فعال: {شناسه: (handle, thread)}
+errors = []  # لیست برای ذخیره خطاها
 
 # --- پیکربندی Google Drive ---
 temp_dir = "/tmp/vahab_auth"
@@ -64,7 +66,7 @@ class TorrentDownloader(threading.Thread):
         self.completed = False
 
     def run(self):
-        global active_downloads
+        global active_downloads, errors
         params = {"save_path": DOWNLOAD_DIR, "storage_mode": lt.storage_mode_t(2)}
         try:
             self.handle = lt.add_magnet_uri(ses, self.magnet_link, params)
@@ -97,7 +99,7 @@ class TorrentDownloader(threading.Thread):
                                 ).result()
                             self.send_completion_message(name, msg.message_id)
                         except Exception as e:
-                            self.send_message(f"<b>❌ خطا در ارسال فایل</b> (ID: {self.download_id}): {e}")
+                            errors.append(f"خطا در ارسال فایل (ID: {self.download_id}): {e}")
                         finally:
                             os.remove(file_path)
                 elif self.destination == "google_drive":
@@ -109,10 +111,11 @@ class TorrentDownloader(threading.Thread):
                         self.send_completion_message(name, file_url)
                         os.remove(file_path)
                     except Exception as e:
-                        self.send_message(f"<b>❌ خطا در آپلود به گوگل درایو</b> (ID: {self.download_id}): {e}")
+                        errors.append(f"خطا در آپلود به گوگل درایو (ID: {self.download_id}): {e}")
                 del active_downloads[self.download_id]
+                gc.collect()  # آزاد کردن حافظه
         except Exception as e:
-            self.send_message(f"<b>❌ خطا در دانلود</b> (ID: {self.download_id}): {e}")
+            errors.append(f"خطا در دانلود (ID: {self.download_id}): {e}")
 
     def send_message(self, text):
         asyncio.run_coroutine_threadsafe(
@@ -141,6 +144,16 @@ class TorrentDownloader(threading.Thread):
         if self.handle:
             ses.remove_torrent(self.handle)
             self.send_message(f"<b>⏹ دانلود متوقف شد</b> (ID: {self.download_id})")
+
+# --- تابع اعلان خطاها به‌صورت دوره‌ای ---
+async def check_errors(context: ContextTypes.DEFAULT_TYPE):
+    global errors
+    while True:
+        if errors:
+            error_msg = "\n".join(errors)
+            await context.bot.send_message(chat_id=OWNER_ID, text=f"<b>❌ خطاها:</b>\n{error_msg}", parse_mode='HTML')
+            errors = []  # پاک کردن خطاها بعد از ارسال
+        await asyncio.sleep(300)  # هر 5 دقیقه (300 ثانیه) چک کن
 
 # --- فرمان /start ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -310,6 +323,9 @@ executor = ThreadPoolExecutor(max_workers=5)
 def main():
     logging.basicConfig(level=logging.INFO)
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+
+    # اضافه کردن تسک اعلان خطاها
+    application.job_queue.run_repeating(check_errors, interval=300, first=0)
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("list", list_downloads))
