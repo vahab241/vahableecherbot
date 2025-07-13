@@ -5,6 +5,7 @@ import shutil
 import logging
 import time
 import gc
+import threading  # اضافه کردن ماژول threading
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -17,8 +18,7 @@ from telegram.ext import (
 )
 from pydrive2.auth import GoogleAuth
 from pydrive2.drive import GoogleDrive
-import socket
-from filelock import FileLock  # اضافه کردن پکیج filelock
+from filelock import FileLock
 
 # --- تنظیمات ---
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
@@ -312,7 +312,7 @@ def run_dummy_server():
         conn.close()
 
 def main():
-    lock = FileLock(LOCK_FILE, timeout=1)  # قفل با زمان‌بندی
+    lock = FileLock(LOCK_FILE, timeout=1)
     try:
         with lock:
             logger.info("قفل با موفقیت گرفته شد. اجرای ربات شروع شد.")
