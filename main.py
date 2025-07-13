@@ -2,6 +2,7 @@ import libtorrent as lt
 import asyncio
 import threading
 import os
+import shutil
 import logging
 import time
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -17,15 +18,26 @@ DOWNLOAD_DIR = "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 # --- پیکربندی Google Drive ---
+# کپی موقت فایل‌ها از /etc/secrets/ به مسیر محلی
+temp_dir = "/tmp/vahab_auth"
+os.makedirs(temp_dir, exist_ok=True)
+token_path = os.path.join(temp_dir, "token.json")
+creds_path = os.path.join(temp_dir, "credentials.json")
+shutil.copyfile("/etc/secrets/token.json", token_path)
+shutil.copyfile("/etc/secrets/credentials.json", creds_path)
+
 gauth = GoogleAuth()
-gauth.LoadCredentialsFile("/etc/secrets/token.json")
+gauth.LoadCredentialsFile(token_path)
 if gauth.credentials is None:
-    gauth.LoadClientConfigFile("/etc/secrets/credentials.json")
+    gauth.LoadClientConfigFile(creds_path)
 elif gauth.access_token_expired:
     gauth.Refresh()
 else:
     gauth.Authorize()
 drive = GoogleDrive(gauth)
+
+# حذف فایل‌های موقت بعد از استفاده (اختیاری)
+shutil.rmtree(temp_dir, ignore_errors=True)
 
 # --- پیکربندی libtorrent ---
 ses = lt.session({'listen_interfaces': '0.0.0.0:6881'})
