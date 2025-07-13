@@ -1,5 +1,5 @@
 services:
-  - type: web
+  - type: background
     name: vahableecherbot
     runtime: python
     buildCommand: pip install -r requirements.txt
