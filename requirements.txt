@@ -1,3 +1,9 @@
-python-telegram-bot==20.7
-libtorrent==2.0.11
-pydrive2==1.21.3
+services:
+  - type: worker
+    name: vahableecherbot
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: TELEGRAM_TOKEN
+      - key: OWNER_ID
