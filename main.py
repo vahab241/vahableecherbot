@@ -1,4 +1,3 @@
-# mail.py
 import libtorrent as lt
 import asyncio
 import os
@@ -8,29 +7,35 @@ import time
 import gc
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler,
-    ContextTypes, filters, Application
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    filters,
 )
 from pydrive2.auth import GoogleAuth
 from pydrive2.drive import GoogleDrive
 from filelock import FileLock
 
 # --- تنظیمات ---
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
-if not TELEGRAM_TOKEN:
-    raise ValueError("TELEGRAM_TOKEN is not set in environment variables.")
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
 DOWNLOAD_DIR = "/tmp/downloads"
-os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-active_downloads = {}
-errors = []
 LOCK_FILE = "/tmp/vahab_bot.lock"
+os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
+active_downloads = {}  # {download_id: (handle, task, message_id)}
+errors = []
 
 # --- لاگ ---
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+)
 logger = logging.getLogger(__name__)
 
-# --- احراز هویت Google Drive ---
+# --- Google Drive Auth ---
 def setup_drive_auth():
     temp_dir = "/tmp/vahab_auth"
     os.makedirs(temp_dir, exist_ok=True)
@@ -38,11 +43,12 @@ def setup_drive_auth():
     creds_path = os.path.join(temp_dir, "credentials.json")
     try:
         if os.path.exists("/etc/secrets/token.json") and os.path.exists("/etc/secrets/credentials.json"):
-            shutil.copyfile("/etc/secrets/token.json", token_path)
-            shutil.copyfile("/etc/secrets/credentials.json", creds_path)
+            shutil.copy("/etc/secrets/token.json", token_path)
+            shutil.copy("/etc/secrets/credentials.json", creds_path)
         else:
-            logger.error("Google Drive auth files not found in /etc/secrets.")
+            logger.error("فایل‌های گوگل درایو یافت نشد.")
             return None
+
         gauth = GoogleAuth()
         gauth.LoadCredentialsFile(token_path)
         if gauth.credentials is None:
@@ -51,41 +57,41 @@ def setup_drive_auth():
             gauth.Refresh()
         else:
             gauth.Authorize()
+
         drive = GoogleDrive(gauth)
-        logger.info("Google Drive auth success.")
+        logger.info("احراز هویت گوگل درایو موفق بود.")
         return drive
     except Exception as e:
-        logger.error(f"Drive auth error: {e}")
+        logger.error(f"Google Drive Auth Error: {e}")
         return None
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 drive = setup_drive_auth()
 
-# --- تنظیمات libtorrent ---
+# --- تنظیم libtorrent ---
 ses = lt.session({
     'listen_interfaces': '0.0.0.0:6881',
     'connections_limit': 200,
     'download_rate_limit': 0,
 })
 
-# --- دانلود ---
+# --- تابع دانلود ---
 async def download_torrent(download_id, magnet_link, context, chat_id, destination, message_id):
+    global active_downloads
     if not drive and destination == "google_drive":
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id,
-                                            text="❌ احراز هویت Google Drive انجام نشده.", parse_mode="HTML")
+        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="❌ گوگل درایو احراز نشد.")
         return
-
-    handle = lt.add_magnet_uri(ses, magnet_link, {"save_path": DOWNLOAD_DIR, "storage_mode": lt.storage_mode_t(2)})
+    
+    handle = lt.add_magnet_uri(ses, magnet_link, {"save_path": DOWNLOAD_DIR})
     active_downloads[download_id] = (handle, None, message_id)
-    await context.bot.send_message(chat_id=chat_id, text=f"🔍 دریافت اطلاعات تورنت... (ID: {download_id})", parse_mode="HTML")
 
+    await context.bot.send_message(chat_id=chat_id, text="🔍 در حال واکشی اطلاعات...")
     while not handle.has_metadata():
         await asyncio.sleep(1)
 
     name = handle.name()
-    await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id,
-                                        text=f"⬇️ دانلود شروع شد: *{name}* (ID: {download_id})", parse_mode="HTML")
+    await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"⬇️ دانلود {name} شروع شد")
 
     while not handle.is_seed():
         s = handle.status()
@@ -93,66 +99,66 @@ async def download_torrent(download_id, magnet_link, context, chat_id, destinati
         speed = int(s.download_rate / 1000)
         bar = "█" * (percent // 10) + "-" * (10 - percent // 10)
         await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id,
-                                            text=f"📥 *{name}* [{bar}] {percent}% ({speed} KB/s)", parse_mode="HTML")
+                                            text=f"📥 {name}\n[{bar}] {percent}% ({speed} KB/s)")
         await asyncio.sleep(5)
 
     file_path = os.path.join(DOWNLOAD_DIR, name)
-    if os.path.exists(file_path):
-        if destination == "telegram":
-            await context.bot.send_document(chat_id=chat_id, document=open(file_path, "rb"))
-        elif destination == "google_drive":
-            file_drive = drive.CreateFile({"title": name})
-            file_drive.SetContentFile(file_path)
-            file_drive.Upload()
-            url = file_drive["webContentLink"]
-            await context.bot.send_message(chat_id=chat_id, text=f"📤 آپلود شد: {url}")
-        os.remove(file_path)
+    if destination == "telegram":
+        with open(file_path, "rb") as f:
+            await context.bot.send_document(chat_id=chat_id, document=f)
+    elif destination == "google_drive":
+        gfile = drive.CreateFile({"title": name})
+        gfile.SetContentFile(file_path)
+        gfile.Upload()
+        link = gfile["webContentLink"]
+        await context.bot.send_message(chat_id=chat_id, text=f"✅ آپلود شد: {link}")
+
+    os.remove(file_path)
     del active_downloads[download_id]
     gc.collect()
 
-# --- بررسی خطاها ---
-async def check_errors(context):
-    if errors:
-        await context.bot.send_message(chat_id=OWNER_ID, text="\n".join(errors))
-        errors.clear()
-
-# --- دستورات ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("سلام! لینک مگنت رو بفرست.")
-
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    link = update.message.text.strip()
-    if link.startswith("magnet:?xt="):
-        did = str(len(active_downloads) + 1)
-        context.user_data["magnet_link"] = link
-        kb = [[InlineKeyboardButton("تلگرام", callback_data=f"telegram_{did}"),
-               InlineKeyboardButton("گوگل درایو", callback_data=f"google_drive_{did}")]]
-        await update.message.reply_text(f"کجا ذخیره بشه؟ (ID: {did})", reply_markup=InlineKeyboardMarkup(kb))
-
-# --- کال‌بک ---
+# --- Callbacks ---
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    action, did = query.data.split("_", 1)
-    magnet = context.user_data.get("magnet_link")
-    if not magnet:
-        await query.edit_message_text("❌ لینک مگنت پیدا نشد.")
-        return
-    await query.edit_message_text(f"📥 شروع دانلود (ID: {did}) به مقصد {action}.")
-    context.application.create_task(
-        download_torrent(did, magnet, context, query.message.chat_id, action, query.message.message_id)
-    )
+    action, download_id = query.data.split("_", 1)
 
-# --- اجرا ---
+    if action in ("telegram", "google_drive"):
+        magnet_link = context.user_data.get("magnet_link")
+        if not magnet_link:
+            await query.edit_message_text("❌ لینک مگنت پیدا نشد")
+            return
+        await query.edit_message_text(f"📥 شروع دانلود (ID: {download_id}) در {action}")
+        context.application.create_task(
+            download_torrent(download_id, magnet_link, context, query.message.chat_id, action, query.message.message_id)
+        )
+
+# --- دستورات ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("سلام! لینک مگنت بفرست.")
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID:
+        return
+    text = update.message.text.strip()
+    if text.startswith("magnet:?xt="):
+        download_id = str(len(active_downloads) + 1)
+        context.user_data["magnet_link"] = text
+        kb = [[InlineKeyboardButton("تلگرام", callback_data=f"telegram_{download_id}"),
+               InlineKeyboardButton("گوگل درایو", callback_data=f"google_drive_{download_id}")]]
+        await update.message.reply_text("کجا ذخیره کنم؟", reply_markup=InlineKeyboardMarkup(kb))
+
+# --- اجرای ربات ---
 def main():
-    lock = FileLock(LOCK_FILE, timeout=1)
-    with lock:
-        app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-        app.job_queue.run_repeating(check_errors, interval=300)
-        app.add_handler(CommandHandler("start", start))
-        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-        app.add_handler(CallbackQueryHandler(handle_callback))
-        app.run_polling()
+    if not TELEGRAM_TOKEN:
+        raise ValueError("TELEGRAM_TOKEN مشخص نشده.")
+
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_handler(CallbackQueryHandler(handle_callback))
+
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
