@@ -5,8 +5,6 @@ import shutil
 import logging
 import time
 import gc
-import threading
-import socket
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -17,7 +15,6 @@ from telegram.ext import (
     ContextTypes,
     filters,
     ExtBot,
-    DefaultFilter,
 )
 from pydrive2.auth import GoogleAuth
 from pydrive2.drive import GoogleDrive
@@ -33,6 +30,7 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 active_downloads = {}  # {download_id: (handle, task, message_id)}
 errors = []
 LOCK_FILE = "/tmp/vahab_bot.lock"
+PORT = int(os.environ.get("PORT", 8080))  # پورت از محیط
 
 # --- پیکربندی لاگینگ ---
 logging.basicConfig(
@@ -334,7 +332,6 @@ def main():
     try:
         with lock:
             logger.info("قفل با موفقیت گرفته شد. اجرای ربات شروع شد.")
-            # غیرفعال کردن پورت صوری
             application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
             # تنظیم تسک دوره‌ای
@@ -347,9 +344,9 @@ def main():
             application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
             application.add_handler(MessageHandler(filters.Document.ALL, handle_file))
             application.add_handler(CallbackQueryHandler(handle_callback))
-            application.add_error_handler(error_handler)  # اضافه کردن handler خطا
+            application.add_error_handler(error_handler)
 
-            # اجرای ربات
+            # اجرای ربات با پورت از محیط
             application.run_polling(allowed_updates=Update.ALL_TYPES)
     except Exception as e:
         logger.error(f"خطا در اجرای ربات: {e}", exc_info=True)
