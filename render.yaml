@@ -9,8 +9,3 @@ services:
         sync: false
       - key: OWNER_ID
         sync: false
-    secretFiles:
-      - source: token.json
-        mountPath: /etc/secrets/token.json
-      - source: credentials.json
-        mountPath: /etc/secrets/credentials.json
