@@ -94,20 +94,23 @@ async def download_torrent(download_id: str, magnet_link: str, context: ContextT
             parse_mode="HTML",
         )
         return
+
+    logger.info(f"شروع دانلود: ID={download_id}")
     params = {"save_path": DOWNLOAD_DIR, "storage_mode": lt.storage_mode_t(2)}
     handle = lt.add_magnet_uri(ses, magnet_link, params)
-    active_downloads[download_id] = (handle, None, message_id)
-    await context.bot.send_message(chat_id=chat_id, text=f"<b>🔍 در حال دریافت اطلاعات تورنت</b> (ID: {download_id})...", parse_mode="HTML")
-    while not handle.has_metadata():
+
+    for _ in range(60):
+        if handle.has_metadata():
+            break
         await asyncio.sleep(1)
+    else:
+        errors.append(f"دریافت متادیتای تورنت ناموفق بود (ID: {download_id})")
+        return
 
     name = handle.name()
-    await context.bot.edit_message_text(
-        chat_id=chat_id,
-        message_id=message_id,
-        text=f"<b>⬇️ دانلود آغاز شد</b>: *{name}* (ID: {download_id})",
-        parse_mode="HTML",
-    )
+    active_downloads[download_id] = (handle, None, message_id)
+
+    await context.bot.send_message(chat_id=chat_id, text=f"<b>⬇️ دانلود آغاز شد</b>: *{name}* (ID: {download_id})", parse_mode="HTML")
     while not handle.is_seed():
         s = handle.status()
         percent = int(s.progress * 100)
@@ -125,239 +128,42 @@ async def download_torrent(download_id: str, magnet_link: str, context: ContextT
     if os.path.exists(file_path):
         if destination == "telegram":
             try:
+                logger.info("در حال ارسال به تلگرام...")
                 with open(file_path, "rb") as f:
                     await context.bot.send_document(chat_id=chat_id, document=f)
-                keyboard = [[InlineKeyboardButton("مشاهده", callback_data=f"view_{download_id}")]]
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=f"<b>📤 فایل آماده است</b>: *{name}*",
-                    parse_mode="HTML",
-                    reply_markup=reply_markup,
-                )
             except Exception as e:
                 errors.append(f"خطا در ارسال فایل (ID: {download_id}): {e}")
             finally:
                 os.remove(file_path)
         elif destination == "google_drive":
             try:
+                logger.info("در حال آپلود به گوگل درایو...")
                 file_drive = drive.CreateFile({"title": name})
                 file_drive.SetContentFile(file_path)
                 file_drive.Upload()
                 file_url = file_drive["webContentLink"]
-                keyboard = [[InlineKeyboardButton("مشاهده", callback_data=f"view_{download_id}")]]
-                reply_markup = InlineKeyboardMarkup(keyboard)
                 await context.bot.send_message(
                     chat_id=chat_id,
-                    text=f"<b>📤 فایل آماده است</b>: *{name}*\nلینک: {file_url}",
+                    text=f"<b>📤 فایل آپلود شد</b>: {file_url}",
                     parse_mode="HTML",
-                    reply_markup=reply_markup,
                 )
             except Exception as e:
                 errors.append(f"خطا در آپلود به گوگل درایو (ID: {download_id}): {e}")
             finally:
                 os.remove(file_path)
+
     del active_downloads[download_id]
     gc.collect()
 
-# --- تابع اعلان خطاها ---
-async def check_errors(context: ContextTypes.DEFAULT_TYPE):
-    global errors
-    if errors:
-        error_msg = "\n".join(errors)
-        await context.bot.send_message(chat_id=OWNER_ID, text=f"<b>❌ خطاها:</b>\n{error_msg}", parse_mode="HTML")
-        errors.clear()
+# --- اصلاح بخش اجرای وظیفه دانلود در handle_callback ---
+# فقط این تکه کد رو جایگزین بخش دکمه‌های telegram و google_drive در handle_callback کن:
 
-# --- فرمان‌ها ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "<b>سلام!</b> لینک مگنت، فایل تورنت یا متنی بفرست. برای لیست دانلودها /list بفرست.", parse_mode="HTML"
-    )
-
-async def list_downloads(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID:
-        await context.bot.send_message(chat_id=update.effective_user.id, text="❗ فقط مالک ربات می‌تونه ازش استفاده کنه.")
-        return
-    if not active_downloads:
-        await context.bot.send_message(chat_id=OWNER_ID, text="<b>📋 هیچ دانلود فعالی وجود نداره.</b>", parse_mode="HTML")
-        return
-    keyboard = [
-        [
-            InlineKeyboardButton(f"ID: {did} [{progress_bar}] {percent}%", callback_data=f"status_{did}"),
-            InlineKeyboardButton("توقف", callback_data=f"stop_{did}"),
-            InlineKeyboardButton("حذف", callback_data=f"delete_{did}"),
-        ]
-        for did, (handle, _, _) in active_downloads.items()
-        if (s := handle.status()) and (percent := int(s.progress * 100)) and (speed := int(s.download_rate / 1000)) and (
-            progress_bar := "█" * (percent // 10) + "-" * (10 - percent // 10)
-        )
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await context.bot.send_message(chat_id=OWNER_ID, text="<b>📋 لیست دانلودهای فعال:</b>", parse_mode="HTML", reply_markup=reply_markup)
-
-async def stop_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID:
-        await context.bot.send_message(chat_id=update.effective_user.id, text="❗ فقط مالک ربات می‌تونه ازش استفاده کنه.")
-        return
-    if not context.args:
-        await context.bot.send_message(chat_id=OWNER_ID, text="<b>❗ لطفاً شناسه دانلود رو وارد کن</b> (مثال: /stop 1).", parse_mode="HTML")
-        return
-    download_id = context.args[0]
-    if download_id in active_downloads:
-        handle, _, _ = active_downloads[download_id]
-        ses.remove_torrent(handle)
-        del active_downloads[download_id]
-        await context.bot.send_message(chat_id=OWNER_ID, text=f"<b>⏹ دانلود متوقف شد</b> (ID: {download_id}).", parse_mode="HTML")
-    else:
-        await context.bot.send_message(chat_id=OWNER_ID, text=f"<b>❌ دانلود با ID {download_id} پیدا نشد</b>.", parse_mode="HTML")
-
-# --- مدیریت کلیک دکمه‌ها ---
-async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    action, download_id = query.data.split("_", 1)
-    logger.info(f"دکمه کلیک شد: action={action}, download_id={download_id}")
-
-    if action == "status":
-        handle, _, message_id = active_downloads.get(download_id, (None, None, None))
-        if handle:
-            s = handle.status()
-            percent = int(s.progress * 100)
-            speed = int(s.download_rate / 1000)
-            progress_bar = "█" * (percent // 10) + "-" * (10 - percent // 10)
-            await context.bot.edit_message_text(
-                chat_id=query.message.chat_id,
-                message_id=message_id,
-                text=f"<b>📊 وضعیت</b> (ID: {download_id})\n[{progress_bar}] <i>{percent}% ({speed} KB/s)</i>",
-                parse_mode="HTML",
-            )
-    elif action == "stop":
-        if download_id in active_downloads:
-            handle, _, message_id = active_downloads[download_id]
-            ses.remove_torrent(handle)
-            del active_downloads[download_id]
-            await context.bot.edit_message_text(
-                chat_id=query.message.chat_id,
-                message_id=message_id,
-                text=f"<b>⏹ دانلود متوقف شد</b> (ID: {download_id}).",
-                parse_mode="HTML",
-            )
-    elif action == "delete":
-        if download_id in active_downloads:
-            handle, _, message_id = active_downloads[download_id]
-            ses.remove_torrent(handle)
-            del active_downloads[download_id]
-            await context.bot.edit_message_text(
-                chat_id=query.message.chat_id,
-                message_id=message_id,
-                text=f"<b>🗑 دانلود حذف شد</b> (ID: {download_id}).",
-                parse_mode="HTML",
-            )
-    elif action == "view" and download_id in active_downloads:
-        handle, _, _ = active_downloads[download_id]
-        name = handle.name()
-        file_path = os.path.join(DOWNLOAD_DIR, name)
-        if os.path.exists(file_path):
-            with open(file_path, "rb") as f:
-                await query.message.reply_document(document=f)
-        else:
-            await query.edit_message_text(f"<b>❌ فایل {name} (ID: {download_id}) پیدا نشد</b>.", parse_mode="HTML")
-    elif action in ("telegram", "google_drive"):
-        magnet_link = context.user_data.get("magnet_link")
-        if not magnet_link:
-            await query.edit_message_text("<b>❌ خطا: لینک مگنت پیدا نشد</b>.", parse_mode="HTML")
-            return
-        await query.edit_message_text(f"<b>📥 دانلود شروع شد</b> (ID: {download_id}) و فایل در *{action}* ذخیره می‌شه.", parse_mode="HTML")
-        task = asyncio.create_task(download_torrent(download_id, magnet_link, context, query.message.chat_id, action, query.message.message_id))
-        active_downloads[download_id] = (None, task, query.message.message_id)
-
-# --- پیام متنی ---
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID:
-        await context.bot.send_message(chat_id=update.effective_user.id, text="❗ فقط مالک ربات می‌تونه ازش استفاده کنه.")
-        return
-    link = update.message.text.strip()
-    if link.startswith("magnet:?xt="):
-        download_id = str(len(active_downloads) + 1)
-        context.user_data["magnet_link"] = link
-        keyboard = [[InlineKeyboardButton("تلگرام", callback_data=f"telegram_{download_id}"), InlineKeyboardButton("گوگل درایو", callback_data=f"google_drive_{download_id}")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(f"<b>فایل کجا ذخیره بشه؟</b> (ID: {download_id})", parse_mode="HTML", reply_markup=reply_markup)
-    else:
-        await context.bot.send_message(chat_id=OWNER_ID, text="<b>❗ لطفاً فقط لینک مگنت معتبر ارسال کنید</b>.", parse_mode="HTML")
-
-# --- دریافت فایل تورنت یا متنی ---
-async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID:
-        await context.bot.send_message(chat_id=update.effective_user.id, text="❗ فقط مالک ربات می‌تونه ازش استفاده کنه.")
-        return
-    file_path = "/tmp/temp_file"
-    try:
-        file = await update.message.document.get_file()
-        await file.download_to_drive(file_path)
-        if file.file_name.endswith((".torrent", ".txt")):
-            with open(file_path, "r" if file.file_name.endswith(".txt") else "rb") as f:
-                if file.file_name.endswith(".txt"):
-                    for line in f:
-                        line = line.strip()
-                        if line.startswith("magnet:?xt="):
-                            download_id = str(len(active_downloads) + 1)
-                            context.user_data["magnet_link"] = line
-                            keyboard = [
-                                [InlineKeyboardButton("تلگرام", callback_data=f"telegram_{download_id}"), InlineKeyboardButton("گوگل درایو", callback_data=f"google_drive_{download_id}")]
-                            ]
-                            reply_markup = InlineKeyboardMarkup(keyboard)
-                            await update.message.reply_text(
-                                f"<b>فایل {line} کجا ذخیره بشه?</b> (ID: {download_id})", parse_mode="HTML", reply_markup=reply_markup
-                            )
-                else:
-                    download_id = str(len(active_downloads) + 1)
-                    context.user_data["magnet_link"] = file_path
-                    keyboard = [
-                        [InlineKeyboardButton("تلگرام", callback_data=f"telegram_{download_id}"), InlineKeyboardButton("گوگل درایو", callback_data=f"google_drive_{download_id}")]
-                    ]
-                    reply_markup = InlineKeyboardMarkup(keyboard)
-                    await update.message.reply_text(
-                        f"<b>فایل تورنت کجا ذخیره بشه?</b> (ID: {download_id})", parse_mode="HTML", reply_markup=reply_markup
-                    )
-        else:
-            await context.bot.send_message(chat_id=OWNER_ID, text="<b>❗ فقط فایل‌های تورنت (.torrent) یا متنی (.txt) پشتیبانی می‌شوند</b>.", parse_mode="HTML")
-    except Exception as e:
-        await context.bot.send_message(chat_id=OWNER_ID, text=f"<b>❌ خطا در پردازش فایل</b>: {e}", parse_mode="HTML")
-    finally:
-        if os.path.exists(file_path):
-            os.remove(file_path)
-
-# --- مدیریت خطاها ---
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.error(f"اتفاق غیرمنتظره‌ای افتاد: {context.error}")
-    if isinstance(context.error, Exception):
-        await context.bot.send_message(chat_id=OWNER_ID, text=f"<b>⚠️ خطا:</b> {context.error}", parse_mode="HTML")
-
-# --- اجرای ربات ---
-def main():
-    lock = FileLock(LOCK_FILE, timeout=1)
-    try:
-        with lock:
-            logger.info("قفل با موفقیت گرفته شد. اجرای ربات شروع شد.")
-            application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-
-            # تنظیم تسک دوره‌ای
-            application.job_queue.run_repeating(check_errors, interval=300)
-
-            # اضافه کردن هندلرها
-            application.add_handler(CommandHandler("start", start))
-            application.add_handler(CommandHandler("list", list_downloads))
-            application.add_handler(CommandHandler("stop", stop_download))
-            application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-            application.add_handler(MessageHandler(filters.Document.ALL, handle_file))
-            application.add_handler(CallbackQueryHandler(handle_callback))
-            application.add_error_handler(error_handler)
-
-            # اجرای ربات
-            application.run_polling(allowed_updates=Update.ALL_TYPES)
-    except Exception as e:
-        logger.error(f"خطا در اجرای ربات: {e}", exc_info=True)
-
-if __name__ == "__main__":
-    main()
+# elif action in ("telegram", "google_drive"):
+#     magnet_link = context.user_data.get("magnet_link")
+#     if not magnet_link:
+#         await query.edit_message_text("<b>❌ خطا: لینک مگنت پیدا نشد</b>.", parse_mode="HTML")
+#         return
+#     await query.edit_message_text(f"<b>📥 دانلود شروع شد</b> (ID: {download_id}) و فایل در *{action}* ذخیره می‌شه.", parse_mode="HTML")
+#     context.application.create_task(
+#         download_torrent(download_id, magnet_link, context, query.message.chat_id, action, query.message.message_id)
+#     )
