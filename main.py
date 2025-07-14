@@ -5,7 +5,8 @@ import shutil
 import logging
 import time
 import gc
-import threading  # اضافه کردن ماژول threading
+import threading
+import socket  # اضافه کردن ماژول socket
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -27,7 +28,7 @@ if not TELEGRAM_TOKEN:
 OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
 DOWNLOAD_DIR = "/tmp/downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-active_downloads = {}  # {download_id: (handle, task)}
+active_downloads = {}  # {download_id: (handle, task, message_id)}
 errors = []
 LOCK_FILE = "/tmp/vahab_bot.lock"
 PORT = int(os.environ.get("PORT", 8080))
@@ -80,27 +81,33 @@ drive = setup_drive_auth()
 ses = lt.session({"listen_interfaces": "0.0.0.0:6881"})
 
 # --- دانلودکننده تورنت ---
-async def download_torrent(download_id: str, magnet_link: str, context: ContextTypes.DEFAULT_TYPE, chat_id: int, destination: str):
+async def download_torrent(download_id: str, magnet_link: str, context: ContextTypes.DEFAULT_TYPE, chat_id: int, destination: str, message_id: int):
     global active_downloads, errors
     if not drive and destination == "google_drive":
         errors.append(f"احراز هویت Google Drive برای دانلود (ID: {download_id}) انجام نشده.")
         return
     params = {"save_path": DOWNLOAD_DIR, "storage_mode": lt.storage_mode_t(2)}
     handle = lt.add_magnet_uri(ses, magnet_link, params)
-    active_downloads[download_id] = (handle, None)
+    active_downloads[download_id] = (handle, None, message_id)
     await context.bot.send_message(chat_id=chat_id, text=f"<b>🔍 در حال دریافت اطلاعات تورنت</b> (ID: {download_id})...", parse_mode="HTML")
     while not handle.has_metadata():
         await asyncio.sleep(1)
 
     name = handle.name()
-    await context.bot.send_message(chat_id=chat_id, text=f"<b>⬇️ دانلود آغاز شد</b>: *{name}* (ID: {download_id})", parse_mode="HTML")
+    await context.bot.edit_message_text(
+        chat_id=chat_id,
+        message_id=message_id,
+        text=f"<b>⬇️ دانلود آغاز شد</b>: *{name}* (ID: {download_id})",
+        parse_mode="HTML",
+    )
     while not handle.is_seed():
         s = handle.status()
         percent = int(s.progress * 100)
         speed = int(s.download_rate / 1000)
         progress_bar = "█" * (percent // 10) + "-" * (10 - percent // 10)
-        await context.bot.send_message(
+        await context.bot.edit_message_text(
             chat_id=chat_id,
+            message_id=message_id,
             text=f"<b>📥 در حال دانلود</b> *{name}* (ID: {download_id})\n[{progress_bar}] <i>{percent}% ({speed} KB/s)</i>",
             parse_mode="HTML",
         )
@@ -111,7 +118,7 @@ async def download_torrent(download_id: str, magnet_link: str, context: ContextT
         if destination == "telegram":
             try:
                 with open(file_path, "rb") as f:
-                    msg = await context.bot.send_document(chat_id=chat_id, document=f)
+                    await context.bot.send_document(chat_id=chat_id, document=f)
                 keyboard = [[InlineKeyboardButton("مشاهده", callback_data=f"view_{download_id}")]]
                 reply_markup = InlineKeyboardMarkup(keyboard)
                 await context.bot.send_message(
@@ -172,7 +179,7 @@ async def list_downloads(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("توقف", callback_data=f"stop_{did}"),
             InlineKeyboardButton("حذف", callback_data=f"delete_{did}"),
         ]
-        for did, (handle, _) in active_downloads.items()
+        for did, (handle, _, _) in active_downloads.items()
         if (s := handle.status()) and (percent := int(s.progress * 100)) and (speed := int(s.download_rate / 1000)) and (
             progress_bar := "█" * (percent // 10) + "-" * (10 - percent // 10)
         )
@@ -189,7 +196,7 @@ async def stop_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     download_id = context.args[0]
     if download_id in active_downloads:
-        handle, _ = active_downloads[download_id]
+        handle, _, _ = active_downloads[download_id]
         ses.remove_torrent(handle)
         del active_downloads[download_id]
         await context.bot.send_message(chat_id=OWNER_ID, text=f"<b>⏹ دانلود متوقف شد</b> (ID: {download_id}).", parse_mode="HTML")
@@ -200,33 +207,46 @@ async def stop_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    action, download_id = query.data.split("_")[0], query.data.split("_")[1]
+    action, download_id = query.data.split("_", 1)  # جدا کردن فقط با اولین _
     logger.info(f"دکمه کلیک شد: action={action}, download_id={download_id}")
 
     if action == "status":
-        handle, _ = active_downloads.get(download_id, (None, None))
+        handle, _, message_id = active_downloads.get(download_id, (None, None, None))
         if handle:
             s = handle.status()
             percent = int(s.progress * 100)
             speed = int(s.download_rate / 1000)
             progress_bar = "█" * (percent // 10) + "-" * (10 - percent // 10)
-            await query.edit_message_text(
-                f"<b>📊 وضعیت</b> (ID: {download_id})\n[{progress_bar}] <i>{percent}% ({speed} KB/s)</i>", parse_mode="HTML"
+            await context.bot.edit_message_text(
+                chat_id=query.message.chat_id,
+                message_id=message_id,
+                text=f"<b>📊 وضعیت</b> (ID: {download_id})\n[{progress_bar}] <i>{percent}% ({speed} KB/s)</i>",
+                parse_mode="HTML",
             )
     elif action == "stop":
         if download_id in active_downloads:
-            handle, _ = active_downloads[download_id]
+            handle, _, message_id = active_downloads[download_id]
             ses.remove_torrent(handle)
             del active_downloads[download_id]
-            await query.edit_message_text(f"<b>⏹ دانلود متوقف شد</b> (ID: {download_id}).", parse_mode="HTML")
+            await context.bot.edit_message_text(
+                chat_id=query.message.chat_id,
+                message_id=message_id,
+                text=f"<b>⏹ دانلود متوقف شد</b> (ID: {download_id}).",
+                parse_mode="HTML",
+            )
     elif action == "delete":
         if download_id in active_downloads:
-            handle, _ = active_downloads[download_id]
+            handle, _, message_id = active_downloads[download_id]
             ses.remove_torrent(handle)
             del active_downloads[download_id]
-            await query.edit_message_text(f"<b>🗑 دانلود حذف شد</b> (ID: {download_id}).", parse_mode="HTML")
+            await context.bot.edit_message_text(
+                chat_id=query.message.chat_id,
+                message_id=message_id,
+                text=f"<b>🗑 دانلود حذف شد</b> (ID: {download_id}).",
+                parse_mode="HTML",
+            )
     elif action == "view" and download_id in active_downloads:
-        handle, _ = active_downloads[download_id]
+        handle, _, _ = active_downloads[download_id]
         name = handle.name()
         file_path = os.path.join(DOWNLOAD_DIR, name)
         if os.path.exists(file_path):
@@ -240,8 +260,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("<b>❌ خطا: لینک مگنت پیدا نشد</b>.", parse_mode="HTML")
             return
         await query.edit_message_text(f"<b>📥 دانلود شروع شد</b> (ID: {download_id}) و فایل در *{action}* ذخیره می‌شه.", parse_mode="HTML")
-        task = asyncio.create_task(download_torrent(download_id, magnet_link, context, query.message.chat_id, action))
-        active_downloads[download_id] = (None, task)
+        task = asyncio.create_task(download_torrent(download_id, magnet_link, context, query.message.chat_id, action, query.message.message_id))
+        active_downloads[download_id] = (None, task, query.message.message_id)
 
 # --- پیام متنی ---
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
