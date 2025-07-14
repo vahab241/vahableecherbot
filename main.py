@@ -30,7 +30,7 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 active_downloads = {}  # {download_id: (handle, task, message_id)}
 errors = []
 LOCK_FILE = "/tmp/vahab_bot.lock"
-PORT = int(os.environ.get("PORT", 8080))  # پورت از محیط
+PORT = int(os.environ.get("PORT", 8080))  # پورت از محیط (فقط برای سازگاری)
 
 # --- پیکربندی لاگینگ ---
 logging.basicConfig(
@@ -77,7 +77,7 @@ def setup_drive_auth():
 drive = setup_drive_auth()
 
 # --- پیکربندی libtorrent ---
-ses = lt.session({"listen_interfaces": "0.0.0.0:6881"})
+ses = lt.session({"listen_interfaces": "0.0.0.0:6881", "max_connections": 200, "download_rate_limit": 0})
 
 # --- دانلودکننده تورنت ---
 async def download_torrent(download_id: str, magnet_link: str, context: ContextTypes.DEFAULT_TYPE, chat_id: int, destination: str, message_id: int):
@@ -86,10 +86,10 @@ async def download_torrent(download_id: str, magnet_link: str, context: ContextT
         errors.append(f"احراز هویت Google Drive برای دانلود (ID: {download_id}) انجام نشده.")
         return
     params = {"save_path": DOWNLOAD_DIR, "storage_mode": lt.storage_mode_t(2)}
-    handle = lt.add_magnet_uri(ses, magnet_link, params)
+    handle = lt.add_magnet_uri(ses, magnet_link, params)  # TODO: جایگزینی با async_add_magnet_uri در آینده
     active_downloads[download_id] = (handle, None, message_id)
     await context.bot.send_message(chat_id=chat_id, text=f"<b>🔍 در حال دریافت اطلاعات تورنت</b> (ID: {download_id})...", parse_mode="HTML")
-    while not handle.has_metadata():
+    while not handle.has_metadata():  # TODO: جایگزینی با متد جدیدتر
         await asyncio.sleep(1)
 
     name = handle.name()
@@ -346,7 +346,7 @@ def main():
             application.add_handler(CallbackQueryHandler(handle_callback))
             application.add_error_handler(error_handler)
 
-            # اجرای ربات با پورت از محیط
+            # اجرای ربات با پورت از محیط (فقط برای سازگاری)
             application.run_polling(allowed_updates=Update.ALL_TYPES)
     except Exception as e:
         logger.error(f"خطا در اجرای ربات: {e}", exc_info=True)
