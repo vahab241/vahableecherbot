@@ -75,11 +75,12 @@ def setup_drive_auth():
 drive = setup_drive_auth()
 
 # --- پیکربندی libtorrent ---
-ses_settings = lt.session()
-ses_settings.listen_on(0, 6881)  # تنظیم پورت
-ses_settings.set_int(lt.settings_pack.connections_limit, 200)  # حداکثر اتصالات
-ses_settings.set_int(lt.settings_pack.download_rate_limit, 0)  # بدون محدودیت دانلود
-ses = lt.session(ses_settings)
+settings = {
+    'listen_interfaces': '0.0.0.0:6881',
+    'connections_limit': 200,
+    'download_rate_limit': 0,
+}
+ses = lt.session(settings)
 
 # --- دانلودکننده تورنت ---
 async def download_torrent(download_id: str, magnet_link: str, context: ContextTypes.DEFAULT_TYPE, chat_id: int, destination: str, message_id: int):
@@ -170,8 +171,7 @@ async def check_errors(context: ContextTypes.DEFAULT_TYPE):
 # --- فرمان‌ها ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "<b>سلام!</b> لینک مگنت، فایل تورنت یا متنی بفرست. برای لیست دانلودها /list بفرست.",
-        parse_mode="HTML",
+        "<b>سلام!</b> لینک مگنت، فایل تورنت یا متنی بفرست. برای لیست دانلودها /list بفرست.", parse_mode="HTML"
     )
 
 async def list_downloads(update: Update, context: ContextTypes.DEFAULT_TYPE):
