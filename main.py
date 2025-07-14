@@ -1,92 +1,123 @@
-import os
-import asyncio
-import logging
+import os, shutil, asyncio, zipfile, logging, tempfile, gc
 import libtorrent as lt
-from time import sleep
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
-from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler,
-    ContextTypes, filters
-)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 from pydrive2.auth import GoogleAuth
 from pydrive2.drive import GoogleDrive
+from functools import partial
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-TOKEN = os.environ.get("TELEGRAM_TOKEN")
-OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
+# ——— تنظیمات ———
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 DOWNLOAD_DIR = "/tmp/downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+active_queue = {}  # download queue {id: info}
+counter = 0
 
-drive = None
-def setup_drive():
-    global drive
-    if os.path.exists("/etc/secrets/credentials.json") and os.path.exists("/etc/secrets/token.json"):
-        gauth = GoogleAuth()
-        gauth.LoadCredentialsFile("/etc/secrets/token.json")
-        if gauth.access_token_expired:
-            gauth.Refresh()
-        else:
-            gauth.Authorize()
-        drive = GoogleDrive(gauth)
-        logger.info("Google Drive authenticated.")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger()
+
+# ——— Google Drive Auth ———
+def drive_auth():
+    base = "/etc/secrets"
+    paths = ["credentials.json","token.json"]
+    if all(os.path.exists(f"{base}/{p}") for p in paths):
+        shutil.copy(f"{base}/credentials.json","/tmp/cred.json")
+        shutil.copy(f"{base}/token.json","/tmp/token.json")
     else:
-        logger.warning("Google Drive credentials not found.")
-setup_drive()
+        logger.error("Missing Google Drive auth files.")
+        return None
+    g = GoogleAuth()
+    g.LoadCredentialsFile("/tmp/token.json")
+    if not g.credentials or g.access_token_expired:
+        g.Refresh()
+    drive = GoogleDrive(g)
+    logger.info("✅ Google Drive authenticated")
+    return drive
 
-ses = lt.session()
-ses.listen_on(6881, 6891)
+DRIVE = drive_auth()
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("سلام! لینک مگنت تورنت بفرست.")
+# ——— تورنت دانلود ———
+def seed_loop(ses):
+    ses.start_dht()
+    ses.listen_on(6881, 6891)
 
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID:
-        await update.message.reply_text("فقط ادمین مجازه.")
-        return
-    magnet = update.message.text.strip()
-    if not magnet.startswith("magnet:?xt="):
-        await update.message.reply_text("❌ لینک مگنت معتبر نیست.")
-        return
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("تلگرام", callback_data=f"tg|{magnet}")],
-        [InlineKeyboardButton("گوگل درایو", callback_data=f"gd|{magnet}")],
-    ])
-    await update.message.reply_text("✅ کجا ذخیره بشه؟", reply_markup=keyboard)
-
-async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    method, magnet = query.data.split("|", 1)
-    await query.edit_message_text("در حال دانلود...")
+async def process_task(tid, tg_id, magnet, dest, context):
+    ses = lt.session()
+    seed_loop(ses)
     params = {"save_path": DOWNLOAD_DIR}
     handle = lt.add_magnet_uri(ses, magnet, params)
+    name = None
     while not handle.has_metadata():
         await asyncio.sleep(1)
     name = handle.name()
-    await query.edit_message_text(f"دانلود فایل {name} آغاز شد.")
+    msg = await context.bot.send_message(tg_id, f"⬇️ شروع دانلود: *{name}*", parse_mode="Markdown")
     while not handle.is_seed():
-        await asyncio.sleep(5)
-    fpath = os.path.join(DOWNLOAD_DIR, name)
-    if method == "tg":
-        with open(fpath, "rb") as f:
-            await query.message.reply_document(document=f)
-    elif method == "gd" and drive:
-        file_drive = drive.CreateFile({"title": name})
-        file_drive.SetContentFile(fpath)
-        file_drive.Upload()
-        link = file_drive["webContentLink"]
-        await query.message.reply_text(f"آپلود شد به گوگل درایو:
-{link}")
-    os.remove(fpath)
+        s = handle.status()
+        p = int(s.progress * 100)
+        spd = int(s.download_rate/1024)
+        bar = "█"*(p//10) + "-"*(10-p//10)
+        await msg.edit_text(f"`[{bar}] {p}% @ {spd} KB/s`", parse_mode="Markdown")
+        await asyncio.sleep(3)
+    path = os.path.join(DOWNLOAD_DIR, name)
+    zip_path = os.path.join(DOWNLOAD_DIR, name+".zip")
+    zipf = zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED)
+    if os.path.isdir(path):
+        for root, _, files in os.walk(path):
+            for f in files:
+                full = os.path.join(root,f)
+                zipf.write(full, os.path.relpath(full, path))
+    else:
+        zipf.write(path, name)
+    zipf.close()
+    target = zip_path
+    if dest=="telegram":
+        await context.bot.send_document(tg_id, open(target,"rb"))
+    else:
+        if DRIVE:
+            f = DRIVE.CreateFile({"title": os.path.basename(target)})
+            f.SetContentFile(target)
+            f.Upload()
+            link = f["webContentLink"]
+            await context.bot.send_message(tg_id, f"Drive لینک:\n{link}")
+        else:
+            await context.bot.send_message(tg_id, "❌ Drive auth failed")
+    shutil.rmtree(path, ignore_errors=True)
+    os.remove(zip_path)
+    await msg.delete()
+    active_queue.pop(tid, None)
+    gc.collect()
 
-def main():
-    app = ApplicationBuilder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    app.add_handler(CallbackQueryHandler(handle_button))
-    app.run_polling()
+# ——— Handlers ———
+async def cmd_start(u,c): await u.message.reply_text("Send magnet link or .torrent file")
 
-if __name__ == "__main__":
-    main()
+async def cmd_queue(u,c):
+    lines = [f"{tid}: {info['magnet'][:40]}... -> {info['dest']}" for tid, info in active_queue.items()]
+    await c.bot.send_message(u.effective_chat.id, "\n".join(lines) or "Empty queue")
+
+async def handle_text(u,c):
+    global counter
+    mg = u.message.text.strip()
+    if not mg.startswith("magnet:?xt="): return
+    counter+=1
+    tid = str(counter)
+    active_queue[tid] = {"magnet":mg,"dest":None,"chat":u.effective_chat.id}
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("Telegram", f"dst_tel_{tid}"), InlineKeyboardButton("Drive", f"dst_drv_{tid}")]])
+    await u.message.reply_text(f"Choose destination for ID {tid}", reply_markup=kb)
+
+async def handle_cb(u,c):
+    cb = u.callback_query
+    await cb.answer()
+    typ,tid = cb.data.split("_",2)[1:]
+    info = active_queue.get(tid)
+    if not info: return
+    info['dest'] = "telegram" if typ=="tel" else "drive"
+    await cb.edit_message_text(f"Queued ID {tid} to {info['dest']}")
+    c.application.create_task(process_task(tid, info['chat'], info['magnet'], info['dest'], c))
+
+application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+application.add_handler(CommandHandler("start", cmd_start))
+application.add_handler(CommandHandler("queue", cmd_queue))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+application.add_handler(CallbackQueryHandler(handle_cb))
+application.run_polling()
