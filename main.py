@@ -6,7 +6,7 @@ import logging
 import time
 import gc
 import threading
-import socket  # اضافه کردن ماژول socket
+import socket
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -16,6 +16,8 @@ from telegram.ext import (
     CallbackQueryHandler,
     ContextTypes,
     filters,
+    ExtBot,
+    DefaultFilter,
 )
 from pydrive2.auth import GoogleAuth
 from pydrive2.drive import GoogleDrive
@@ -31,7 +33,6 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 active_downloads = {}  # {download_id: (handle, task, message_id)}
 errors = []
 LOCK_FILE = "/tmp/vahab_bot.lock"
-PORT = int(os.environ.get("PORT", 8080))
 
 # --- پیکربندی لاگینگ ---
 logging.basicConfig(
@@ -207,7 +208,7 @@ async def stop_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    action, download_id = query.data.split("_", 1)  # جدا کردن فقط با اولین _
+    action, download_id = query.data.split("_", 1)
     logger.info(f"دکمه کلیک شد: action={action}, download_id={download_id}")
 
     if action == "status":
@@ -320,27 +321,20 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if os.path.exists(file_path):
             os.remove(file_path)
 
-# --- اجرای ربات ---
-def run_dummy_server():
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind(("0.0.0.0", PORT))
-    sock.listen(1)
-    logger.info(f"پورت صوری {PORT} باز شد.")
-    while True:
-        conn, addr = sock.accept()
-        conn.close()
+# --- مدیریت خطاها ---
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.error(f"اتفاق غیرمنتظره‌ای افتاد: {context.error}")
+    if isinstance(context.error, telegram.error.Conflict):
+        logger.warning("تداخل ربات تشخیص داده شد. مطمئن شو فقط یه نمونه فعال باشه.")
+        await context.bot.send_message(chat_id=OWNER_ID, text="<b>⚠️ تداخل ربات: فقط یه نمونه باید فعال باشه</b>", parse_mode="HTML")
 
+# --- اجرای ربات ---
 def main():
     lock = FileLock(LOCK_FILE, timeout=1)
     try:
         with lock:
             logger.info("قفل با موفقیت گرفته شد. اجرای ربات شروع شد.")
-            # اجرای سرور صوری توی ترد جدا
-            dummy_thread = threading.Thread(target=run_dummy_server, daemon=True)
-            dummy_thread.start()
-
-            # ساخت اپلیکیشن
+            # غیرفعال کردن پورت صوری
             application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
             # تنظیم تسک دوره‌ای
@@ -353,14 +347,12 @@ def main():
             application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
             application.add_handler(MessageHandler(filters.Document.ALL, handle_file))
             application.add_handler(CallbackQueryHandler(handle_callback))
+            application.add_error_handler(error_handler)  # اضافه کردن handler خطا
 
             # اجرای ربات
             application.run_polling(allowed_updates=Update.ALL_TYPES)
     except Exception as e:
         logger.error(f"خطا در اجرای ربات: {e}", exc_info=True)
-    finally:
-        if "dummy_thread" in locals():
-            dummy_thread.join(timeout=5)
 
 if __name__ == "__main__":
     main()
