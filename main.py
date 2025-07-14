@@ -14,7 +14,6 @@ from telegram.ext import (
     CallbackQueryHandler,
     ContextTypes,
     filters,
-    ExtBot,
 )
 from pydrive2.auth import GoogleAuth
 from pydrive2.drive import GoogleDrive
@@ -30,7 +29,6 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 active_downloads = {}  # {download_id: (handle, task, message_id)}
 errors = []
 LOCK_FILE = "/tmp/vahab_bot.lock"
-PORT = int(os.environ.get("PORT", 8080))  # پورت از محیط (فقط برای سازگاری)
 
 # --- پیکربندی لاگینگ ---
 logging.basicConfig(
@@ -77,19 +75,29 @@ def setup_drive_auth():
 drive = setup_drive_auth()
 
 # --- پیکربندی libtorrent ---
-ses = lt.session({"listen_interfaces": "0.0.0.0:6881", "max_connections": 200, "download_rate_limit": 0})
+ses_settings = lt.session()
+ses_settings.listen_on(0, 6881)  # تنظیم پورت
+ses_settings.set_int(lt.settings_pack.connections_limit, 200)  # حداکثر اتصالات
+ses_settings.set_int(lt.settings_pack.download_rate_limit, 0)  # بدون محدودیت دانلود
+ses = lt.session(ses_settings)
 
 # --- دانلودکننده تورنت ---
 async def download_torrent(download_id: str, magnet_link: str, context: ContextTypes.DEFAULT_TYPE, chat_id: int, destination: str, message_id: int):
     global active_downloads, errors
     if not drive and destination == "google_drive":
         errors.append(f"احراز هویت Google Drive برای دانلود (ID: {download_id}) انجام نشده.")
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=f"<b>❌ خطا</b>: احراز هویت Google Drive انجام نشده (ID: {download_id}).",
+            parse_mode="HTML",
+        )
         return
     params = {"save_path": DOWNLOAD_DIR, "storage_mode": lt.storage_mode_t(2)}
-    handle = lt.add_magnet_uri(ses, magnet_link, params)  # TODO: جایگزینی با async_add_magnet_uri در آینده
+    handle = lt.add_magnet_uri(ses, magnet_link, params)
     active_downloads[download_id] = (handle, None, message_id)
     await context.bot.send_message(chat_id=chat_id, text=f"<b>🔍 در حال دریافت اطلاعات تورنت</b> (ID: {download_id})...", parse_mode="HTML")
-    while not handle.has_metadata():  # TODO: جایگزینی با متد جدیدتر
+    while not handle.has_metadata():
         await asyncio.sleep(1)
 
     name = handle.name()
@@ -162,7 +170,8 @@ async def check_errors(context: ContextTypes.DEFAULT_TYPE):
 # --- فرمان‌ها ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "<b>سلام!</b> لینک مگنت، فایل تورنت یا متنی بفرست. برای لیست دانلودها /list بفرست.", parse_mode="HTML"
+        "<b>سلام!</b> لینک مگنت، فایل تورنت یا متنی بفرست. برای لیست دانلودها /list بفرست.",
+        parse_mode="HTML",
     )
 
 async def list_downloads(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -322,9 +331,8 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- مدیریت خطاها ---
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error(f"اتفاق غیرمنتظره‌ای افتاد: {context.error}")
-    if isinstance(context.error, telegram.error.Conflict):
-        logger.warning("تداخل ربات تشخیص داده شد. مطمئن شو فقط یه نمونه فعال باشه.")
-        await context.bot.send_message(chat_id=OWNER_ID, text="<b>⚠️ تداخل ربات: فقط یه نمونه باید فعال باشه</b>", parse_mode="HTML")
+    if isinstance(context.error, Exception):
+        await context.bot.send_message(chat_id=OWNER_ID, text=f"<b>⚠️ خطا:</b> {context.error}", parse_mode="HTML")
 
 # --- اجرای ربات ---
 def main():
@@ -346,7 +354,7 @@ def main():
             application.add_handler(CallbackQueryHandler(handle_callback))
             application.add_error_handler(error_handler)
 
-            # اجرای ربات با پورت از محیط (فقط برای سازگاری)
+            # اجرای ربات
             application.run_polling(allowed_updates=Update.ALL_TYPES)
     except Exception as e:
         logger.error(f"خطا در اجرای ربات: {e}", exc_info=True)
