@@ -1,11 +1,16 @@
 services:
-  - type: worker
+  - type: background
     name: vahableecherbot
-    runtime: python
+    env: python
     buildCommand: pip install -r requirements.txt
-    startCommand: python mail.py
+    startCommand: python main.py
     envVars:
       - key: TELEGRAM_TOKEN
-        value: <توکن_ربات>
+        sync: false
       - key: OWNER_ID
-        value: <آیدی_تلگرام_خودت>
+        sync: false
+    secretFiles:
+      - source: token.json
+        mountPath: /etc/secrets/token.json
+      - source: credentials.json
+        mountPath: /etc/secrets/credentials.json
